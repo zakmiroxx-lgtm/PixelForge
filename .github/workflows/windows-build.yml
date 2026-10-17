@@ -2,21 +2,74 @@ name: Build PixelForge Windows
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build PixelForge EXE
+
     runs-on: windows-2022
 
     steps:
-      - name: Download source code
+
+      # 1. Download repository
+      - name: Download Source Code
         uses: actions/checkout@v4
 
+      # 2. Extract ZIP archive
+      - name: Extract PixelForge ZIP
+        shell: pwsh
+        run: |
+          Write-Host "Searching for ZIP archive..."
+
+          $zip = Get-ChildItem -Path . -Filter "*.zip" |
+            Select-Object -First 1
+
+          if (-not $zip) {
+            throw "ERROR: ZIP archive not found!"
+          }
+
+          Write-Host "Found ZIP: $($zip.Name)"
+
+          New-Item -ItemType Directory -Path extracted -Force |
+            Out-Null
+
+          Expand-Archive `
+            -Path $zip.FullName `
+            -DestinationPath extracted `
+            -Force
+
+          Write-Host "ZIP extracted successfully."
+
+          # Find CMakeLists.txt
+          $cmake = Get-ChildItem `
+            -Path extracted `
+            -Filter "CMakeLists.txt" `
+            -Recurse |
+            Select-Object -First 1
+
+          if (-not $cmake) {
+            throw "ERROR: CMakeLists.txt not found inside ZIP!"
+          }
+
+          $projectDir = $cmake.DirectoryName
+
+          Write-Host "Project directory: $projectDir"
+
+          # Copy project files to root
+          Get-ChildItem -Path $projectDir -Force |
+            Copy-Item -Destination . -Recurse -Force
+
+          Write-Host "Project files copied successfully."
+
+      # 3. Setup Visual Studio compiler
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
+      # 4. Install Qt 6
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
         with:
@@ -26,38 +79,92 @@ jobs:
           arch: 'win64_msvc2022_64'
           cache: true
 
+      # 5. Configure CMake
       - name: Configure CMake
         shell: pwsh
         run: |
+          Write-Host "Configuring PixelForge..."
+
           cmake -S . -B build `
             -G "Visual Studio 17 2022" `
             -A x64 `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configuration failed!"
+          }
+
+      # 6. Build application
       - name: Build PixelForge
         shell: pwsh
         run: |
-          cmake --build build --config Release --parallel
+          Write-Host "Building PixelForge..."
 
-      - name: Run tests
+          cmake --build build `
+            --config Release `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "PixelForge build failed!"
+          }
+
+      # 7. Run tests
+      - name: Run Tests
         shell: pwsh
         run: |
-          ctest --test-dir build -C Release --output-on-failure
+          Write-Host "Running tests..."
 
+          ctest --test-dir build `
+            -C Release `
+            --output-on-failure
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed!"
+          }
+
+      # 8. Deploy Qt libraries
       - name: Deploy Qt Libraries
         shell: pwsh
         run: |
-          windeployqt --release build/Release/PixelForge.exe
+          Write-Host "Deploying Qt libraries..."
 
-      - name: Create ZIP archive
+          $exe = "build/Release/PixelForge.exe"
+
+          if (-not (Test-Path $exe)) {
+            throw "PixelForge.exe not found!"
+          }
+
+          windeployqt --release $exe
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Qt deployment failed!"
+          }
+
+      # 9. Create ZIP package
+      - name: Create ZIP Package
         shell: pwsh
         run: |
-          Compress-Archive `
-            -Path build/Release/* `
-            -DestinationPath PixelForge-Windows.zip
+          Write-Host "Creating PixelForge ZIP..."
 
+          $source = "build/Release"
+
+          $destination = "PixelForge-Windows.zip"
+
+          if (Test-Path $destination) {
+            Remove-Item $destination -Force
+          }
+
+          Compress-Archive `
+            -Path "$source/*" `
+            -DestinationPath $destination `
+            -Force
+
+          Write-Host "ZIP package created."
+
+      # 10. Upload finished application
       - name: Upload PixelForge
         uses: actions/upload-artifact@v4
         with:
           name: PixelForge-Windows
           path: PixelForge-Windows.zip
+          if-no-files-found: error
