@@ -10,66 +10,204 @@ on:
 jobs:
   build:
     name: Build PixelForge EXE
-
     runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
 
-      # 1. Download repository
+      # ========================================
+      # STEP 1: Download repository
+      # ========================================
+
       - name: Download Source Code
         uses: actions/checkout@v4
 
-      # 2. Extract ZIP archive
+      # ========================================
+      # STEP 2: Setup Python
+      # ========================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ========================================
+      # STEP 3: Extract ZIP using Python
+      # ========================================
+
       - name: Extract PixelForge ZIP
-        shell: pwsh
         run: |
-          Write-Host "Searching for ZIP archive..."
+          @'
+          import zipfile
+          import pathlib
+          import shutil
+          import sys
 
-          $zip = Get-ChildItem -Path . -Filter "*.zip" |
-            Select-Object -First 1
+          root = pathlib.Path.cwd()
 
-          if (-not $zip) {
-            throw "ERROR: ZIP archive not found!"
+          print("Searching for ZIP archive...")
+
+          archives = sorted(root.glob("*.zip"))
+
+          if not archives:
+              print("ERROR: No ZIP archive found!")
+              sys.exit(1)
+
+          archive = archives[0]
+
+          print(f"Found ZIP: {archive.name}")
+
+          extract_dir = root / "_extracted"
+
+          extract_dir.mkdir(exist_ok=True)
+
+          print("Extracting archive...")
+
+          try:
+              with zipfile.ZipFile(archive, "r") as z:
+                  bad_file = z.testzip()
+
+                  if bad_file:
+                      raise RuntimeError(
+                          f"Corrupted ZIP member: {bad_file}"
+                      )
+
+                  for member in z.infolist():
+                      destination = (
+                          extract_dir / member.filename
+                      ).resolve()
+
+                      if not destination.is_relative_to(
+                          extract_dir.resolve()
+                      ):
+                          raise RuntimeError(
+                              "Unsafe ZIP path detected"
+                          )
+
+                  z.extractall(extract_dir)
+
+          except Exception as error:
+              print(f"Extraction failed: {error}")
+              sys.exit(1)
+
+          print("ZIP extracted successfully!")
+
+          print("Searching for CMakeLists.txt...")
+
+          cmake_files = list(
+              extract_dir.rglob("CMakeLists.txt")
+          )
+
+          if not cmake_files:
+              print("ERROR: CMakeLists.txt not found!")
+              sys.exit(1)
+
+          project_dir = None
+
+          for cmake_file in cmake_files:
+              candidate = cmake_file.parent
+
+              if (candidate / "src").is_dir():
+                  project_dir = candidate
+                  break
+
+          if project_dir is None:
+              print(
+                  "ERROR: Cannot find project root "
+                  "containing CMakeLists.txt and src/"
+              )
+              sys.exit(1)
+
+          print(f"Project root: {project_dir}")
+
+          print("Copying project files...")
+
+          for item in project_dir.iterdir():
+
+              destination = root / item.name
+
+              if destination.exists():
+                  print(
+                      f"Skipping existing item: {item.name}"
+                  )
+                  continue
+
+              if item.is_dir():
+                  shutil.copytree(item, destination)
+              else:
+                  shutil.copy2(item, destination)
+
+          print("Project files ready!")
+
+          print("Root directory contents:")
+
+          for item in root.iterdir():
+              print(" -", item.name)
+
+          '@ | Set-Content -Path extract_project.py -Encoding utf8
+
+          python extract_project.py
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ZIP extraction failed!"
           }
 
-          Write-Host "Found ZIP: $($zip.Name)"
+      # ========================================
+      # STEP 4: Verify project files
+      # ========================================
 
-          New-Item -ItemType Directory -Path extracted -Force |
-            Out-Null
+      - name: Verify PixelForge Structure
+        run: |
+          Write-Host "Checking required project files..."
 
-          Expand-Archive `
-            -Path $zip.FullName `
-            -DestinationPath extracted `
-            -Force
+          $required = @(
+            "CMakeLists.txt",
+            "src/main.cpp",
+            "src/core/Layer.h",
+            "src/core/Layer.cpp",
+            "src/core/Document.h",
+            "src/core/Document.cpp",
+            "src/canvas/Canvas.h",
+            "src/canvas/Canvas.cpp",
+            "src/ui/MainWindow.h",
+            "src/ui/MainWindow.cpp",
+            "tests/DocumentTests.cpp"
+          )
 
-          Write-Host "ZIP extracted successfully."
+          $missing = @()
 
-          # Find CMakeLists.txt
-          $cmake = Get-ChildItem `
-            -Path extracted `
-            -Filter "CMakeLists.txt" `
-            -Recurse |
-            Select-Object -First 1
+          foreach ($file in $required) {
 
-          if (-not $cmake) {
-            throw "ERROR: CMakeLists.txt not found inside ZIP!"
+            if (Test-Path $file) {
+              Write-Host "OK: $file"
+            }
+            else {
+              Write-Host "MISSING: $file"
+              $missing += $file
+            }
+
           }
 
-          $projectDir = $cmake.DirectoryName
+          if ($missing.Count -gt 0) {
+            throw "Missing required files: $($missing -join ', ')"
+          }
 
-          Write-Host "Project directory: $projectDir"
+          Write-Host "Project structure verified!"
 
-          # Copy project files to root
-          Get-ChildItem -Path $projectDir -Force |
-            Copy-Item -Destination . -Recurse -Force
+      # ========================================
+      # STEP 5: Setup MSVC
+      # ========================================
 
-          Write-Host "Project files copied successfully."
-
-      # 3. Setup Visual Studio compiler
-      - name: Setup MSVC
+      - name: Setup Visual Studio Compiler
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 4. Install Qt 6
+      # ========================================
+      # STEP 6: Install Qt
+      # ========================================
+
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
         with:
@@ -79,9 +217,11 @@ jobs:
           arch: 'win64_msvc2022_64'
           cache: true
 
-      # 5. Configure CMake
+      # ========================================
+      # STEP 7: Configure CMake
+      # ========================================
+
       - name: Configure CMake
-        shell: pwsh
         run: |
           Write-Host "Configuring PixelForge..."
 
@@ -94,25 +234,33 @@ jobs:
             throw "CMake configuration failed!"
           }
 
-      # 6. Build application
+          Write-Host "CMake configured successfully!"
+
+      # ========================================
+      # STEP 8: Build application
+      # ========================================
+
       - name: Build PixelForge
-        shell: pwsh
         run: |
           Write-Host "Building PixelForge..."
 
           cmake --build build `
             --config Release `
-            --parallel
+            --parallel 2
 
           if ($LASTEXITCODE -ne 0) {
-            throw "PixelForge build failed!"
+            throw "PixelForge compilation failed!"
           }
 
-      # 7. Run tests
+          Write-Host "Build successful!"
+
+      # ========================================
+      # STEP 9: Run tests
+      # ========================================
+
       - name: Run Tests
-        shell: pwsh
         run: |
-          Write-Host "Running tests..."
+          Write-Host "Running PixelForge tests..."
 
           ctest --test-dir build `
             -C Release `
@@ -122,11 +270,15 @@ jobs:
             throw "Tests failed!"
           }
 
-      # 8. Deploy Qt libraries
+          Write-Host "All tests passed!"
+
+      # ========================================
+      # STEP 10: Deploy Qt libraries
+      # ========================================
+
       - name: Deploy Qt Libraries
-        shell: pwsh
         run: |
-          Write-Host "Deploying Qt libraries..."
+          Write-Host "Preparing portable application..."
 
           $exe = "build/Release/PixelForge.exe"
 
@@ -134,17 +286,23 @@ jobs:
             throw "PixelForge.exe not found!"
           }
 
-          windeployqt --release $exe
+          $deploy = Join-Path $env:QT_ROOT_DIR "bin/windeployqt.exe"
+
+          & $deploy --release $exe
 
           if ($LASTEXITCODE -ne 0) {
             throw "Qt deployment failed!"
           }
 
-      # 9. Create ZIP package
-      - name: Create ZIP Package
-        shell: pwsh
+          Write-Host "Qt libraries deployed!"
+
+      # ========================================
+      # STEP 11: Package application
+      # ========================================
+
+      - name: Create Windows ZIP
         run: |
-          Write-Host "Creating PixelForge ZIP..."
+          Write-Host "Creating distribution archive..."
 
           $source = "build/Release"
 
@@ -159,12 +317,20 @@ jobs:
             -DestinationPath $destination `
             -Force
 
-          Write-Host "ZIP package created."
+          if (-not (Test-Path $destination)) {
+            throw "ZIP creation failed!"
+          }
 
-      # 10. Upload finished application
+          Write-Host "Package created successfully!"
+
+      # ========================================
+      # STEP 12: Upload application
+      # ========================================
+
       - name: Upload PixelForge
         uses: actions/upload-artifact@v4
         with:
           name: PixelForge-Windows
           path: PixelForge-Windows.zip
           if-no-files-found: error
+          retention-days: 30
