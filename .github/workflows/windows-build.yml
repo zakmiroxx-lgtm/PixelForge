@@ -1,1 +1,63 @@
+name: Build PixelForge Windows
 
+on:
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Download source code
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build PixelForge
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Deploy Qt Libraries
+        shell: pwsh
+        run: |
+          windeployqt --release build/Release/PixelForge.exe
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path build/Release/* `
+            -DestinationPath PixelForge-Windows.zip
+
+      - name: Upload PixelForge
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelForge-Windows
+          path: PixelForge-Windows.zip
